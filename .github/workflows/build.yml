@@ -24,6 +24,9 @@ env:
   TARGET_DIR: rockchip/armv8
   DEVICE: sinovoip_bpi-r2-pro
   CCACHE_MAXSIZE: 3G
+  # The cross toolchain is rebuilt every run, so ccache's default mtime check would
+  # treat it as a new compiler and miss on all target code. Key on version/config instead.
+  CCACHE_COMPILERCHECK: "%compiler% -v"
 
 jobs:
   build:
