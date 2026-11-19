@@ -123,15 +123,44 @@ jobs:
           # Drop truncated downloads so they don't poison the cache
           find dl -size -1024c -type f -delete
 
-      - name: Build
+      # Anything in openwrt/files/ is copied into the image's root filesystem.
+      # Each image gets files/common/ plus its own files/<role>/.
+      - name: Build (base station image)
         working-directory: openwrt
         run: |
+          rm -rf files && mkdir files
+          cp -a "$GITHUB_WORKSPACE/files/common/." "$GITHUB_WORKSPACE/files/base/." files/
+
           echo "Building with $(nproc) cores"
           if ! make -j$(($(nproc) + 1)); then
             echo "::warning::Parallel build failed, rerunning single-threaded for a readable log"
             make -j1 V=s 2>&1 | tee build-failure.log
             exit 1
           fi
+
+          mkdir -p "$GITHUB_WORKSPACE/images"
+          for f in bin/targets/$TARGET_DIR/*"$DEVICE"*; do
+            mv "$f" "$GITHUB_WORKSPACE/images/base-${f##*/}"
+          done
+
+      # Everything is already compiled, so only redo the last two stages:
+      # package/install rebuilds the root filesystem (wiping it first) and copies in
+      # files/; target/install packs it into images. Takes minutes, not hours.
+      - name: Build (robot image)
+        working-directory: openwrt
+        run: |
+          rm -rf files && mkdir files
+          cp -a "$GITHUB_WORKSPACE/files/common/." "$GITHUB_WORKSPACE/files/robot/." files/
+
+          if ! make -j$(($(nproc) + 1)) package/install target/install; then
+            echo "::warning::Robot image build failed, rerunning single-threaded for a readable log"
+            make -j1 V=s package/install target/install 2>&1 | tee build-failure.log
+            exit 1
+          fi
+
+          for f in bin/targets/$TARGET_DIR/*"$DEVICE"*; do
+            mv "$f" "$GITHUB_WORKSPACE/images/robot-${f##*/}"
+          done
 
       # OpenWrt builds its own ccache and points it at $(TOPDIR)/.ccache; use the same.
       # Shows hit rate so you can tell whether the restored cache is actually helping.
@@ -160,7 +189,7 @@ jobs:
           mkdir -p $out
 
           ls -la "$bin"
-          cp "$bin"/*"$DEVICE"* $out/
+          cp images/* $out/
           cp "$bin"/profiles.json "$bin"/config.buildinfo "$bin"/feeds.buildinfo \
              "$bin"/version.buildinfo $out/ 2>/dev/null || true
 
@@ -174,7 +203,9 @@ jobs:
           ( cd $out && sha256sum * > sha256sums )
           ls -la $out
 
-          ls $out/*sysupgrade* >/dev/null || { echo "::error::No sysupgrade image produced"; exit 1; }
+          for role in base robot; do
+            ls $out/$role-*sysupgrade* >/dev/null || { echo "::error::No $role sysupgrade image produced"; exit 1; }
+          done
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
@@ -204,8 +235,10 @@ jobs:
             echo "- Built from commit ${GITHUB_SHA::7} of this repo, run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo
             echo "### Flashing"
-            echo "Write \`*-sysupgrade.img.gz\` to an SD card or eMMC (e.g. \`gunzip -c IMAGE | dd of=/dev/sdX bs=4M conv=fsync\`),"
+            echo "There are two images: \`base-*\` for the base station router and \`robot-*\` for the robot router."
+            echo "Write the \`sysupgrade.img.gz\` to an SD card or eMMC (e.g. \`gunzip -c IMAGE | dd of=/dev/sdX bs=4M conv=fsync\`),"
             echo "or use \`sysupgrade\` from an existing OpenWrt install. Verify against \`sha256sums\`."
+            echo "When switching a board to the other role, use \`sysupgrade -n\`: kept settings would keep the old role."
             echo
             echo "### FRR packages included"
             echo '```'

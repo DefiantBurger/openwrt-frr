@@ -1,0 +1,67 @@
+#!/bin/sh
+# Runs once on first boot (OpenWrt deletes it after it succeeds). It sets this
+# board up as the base station or robot router, based on /etc/router-role.
+#
+# It patches the config OpenWrt generated for this board instead of replacing
+# whole files, so board-specific settings (e.g. the MAC addresses derived
+# from the eMMC) are kept.
+#
+#   lan0, lan1  computers, bridged as br-lan  10.0.N.1/24 (DHCP server)
+#   lan2        antenna link A                10.0.101.N/24
+#   lan3        antenna link B                10.0.102.N/24
+#   eth0 (WAN)  unused, left at OpenWrt defaults
+#
+# N is 1 for the base station and 2 for the robot.
+
+. /etc/router-role
+
+# uci-defaults scripts run again after a sysupgrade that keeps settings.
+# If the links already exist, the saved config is already set up, so leave
+# it (and any changes made since) alone.
+uci -q get network.linka >/dev/null && exit 0
+
+uci set system.@system[0].hostname="${ROLE}-router"
+
+# --- Network ---
+# Take lan2/lan3 out of the LAN bridge so each radio link is its own subnet.
+for s in $(uci show network | sed -n 's/^network\.\([^.]*\)=device$/\1/p'); do
+	if [ "$(uci -q get "network.$s.name")" = br-lan ]; then
+		uci -q del_list "network.$s.ports=lan2"
+		uci -q del_list "network.$s.ports=lan3"
+	fi
+done
+
+uci -q delete network.lan.ipaddr
+uci -q delete network.lan.netmask
+uci add_list network.lan.ipaddr="10.0.${N}.1/24"
+
+uci set network.linka=interface
+uci set network.linka.device=lan2
+uci set network.linka.proto=static
+uci add_list network.linka.ipaddr="10.0.101.${N}/24"
+
+uci set network.linkb=interface
+uci set network.linkb.device=lan3
+uci set network.linkb.proto=static
+uci add_list network.linkb.ipaddr="10.0.102.${N}/24"
+
+# --- Firewall ---
+# Put the radio links in the trusted "lan" zone. This is a closed network, so
+# the lan zone's accept-everything policy lets OSPF, BFD and routed traffic
+# through with no extra rules and no NAT.
+for s in $(uci show firewall | sed -n 's/^firewall\.\([^.]*\)=zone$/\1/p'); do
+	if [ "$(uci -q get "firewall.$s.name")" = lan ]; then
+		uci add_list "firewall.$s.network=linka"
+		uci add_list "firewall.$s.network=linkb"
+	fi
+done
+
+uci commit system
+uci commit network
+uci commit firewall
+
+# --- FRR ---
+# zebra, staticd and mgmtd always run; turn on OSPF and BFD.
+sed -i -e 's/^ospfd=no/ospfd=yes/' -e 's/^bfdd=no/bfdd=yes/' /etc/frr/daemons
+
+exit 0

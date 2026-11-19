@@ -1,0 +1,3 @@
+# Read by /etc/uci-defaults/90-router-role on first boot.
+ROLE=robot
+N=2
